@@ -70,6 +70,10 @@ impl ResponsesInput {
     }
 
     /// Normalize client tool items only in the model-facing copy of canonical history.
+    ///
+    /// Inline text files become `input_text` parts in place; the canonical
+    /// history keeps the client's `input_file`. Callers validate first, so a
+    /// file that cannot be inlined is never normalized.
     pub(crate) fn normalized_model_input(&self) -> Cow<'_, Self> {
         let input = self.model_input();
         let has_client_tools = matches!(&*input, Self::Items(items) if items.iter().any(|item| matches!(item,
@@ -80,7 +84,8 @@ impl ResponsesInput {
             InOutItem::Input(InputItem::Message(message)) if matches!(&message.content,
                 InputMessageContent::Parts(parts) if parts.iter().any(|part| matches!(part,
                     InputContent::InputImage(image) if image.detail.is_none()))))));
-        if !has_client_tools && !has_image_without_detail {
+        let has_inline_file = input.has_inline_text_file();
+        if !has_client_tools && !has_image_without_detail && !has_inline_file {
             return input;
         }
         let mut model = if has_client_tools {
@@ -96,6 +101,10 @@ impl ResponsesInput {
                     for part in parts {
                         if let InputContent::InputImage(image) = part {
                             image.detail.get_or_insert_with(|| "auto".to_owned());
+                        } else if let InputContent::InputFile(file) = part
+                            && let Ok(text) = file.inline_text()
+                        {
+                            *part = InputContent::InputText(InputTextContent::new(text));
                         }
                     }
                 }
@@ -223,5 +232,30 @@ mod tests {
             serialize_to_value(&input).unwrap(),
             serialize_to_value(&ResponsesInput::from(canonical)).unwrap()
         );
+    }
+
+    #[test]
+    fn inline_text_files_are_inlined_only_in_the_model_copy() {
+        let file = json!({"type":"input_file", "file_data":"data:text/plain;base64,aGk=", "filename":"notes.txt"});
+        let input: ResponsesInput = deserialize_from_value(json!([
+            {"role":"user", "content":[{"type":"input_text", "text":"before"}, file.clone(),
+                {"type":"input_text", "text":"after"}]}
+        ]))
+        .unwrap();
+        let model = input.normalized_model_input();
+        assert!(matches!(model, Cow::Owned(_)));
+        assert_eq!(
+            serialize_to_value(&*model).unwrap()[0]["content"],
+            json!([{"type":"input_text", "text":"before"}, {"type":"input_text", "text":"File: notes.txt\nhi"},
+                {"type":"input_text", "text":"after"}])
+        );
+        let canonical = serialize_to_value(&ResponsesInput::from(input.clone().into_canonical_items())).unwrap();
+        assert_eq!(canonical[0]["content"][1], file);
+
+        let plain: ResponsesInput = deserialize_from_value(json!([
+            {"role":"user", "content":[{"type":"input_text", "text":"hello"}]}
+        ]))
+        .unwrap();
+        assert!(matches!(plain.normalized_model_input(), Cow::Borrowed(_)));
     }
 }

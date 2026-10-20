@@ -59,6 +59,14 @@ All notable changes to Agentic API are documented here.
   `web_fetch` stays client-owned. Operators tune or disable the fetcher with `[web_fetch]` in
   `config.toml` or `AGENTIC_WEB_FETCH_ENABLED`, `AGENTIC_WEB_FETCH_ALLOW_PRIVATE_NETWORKS`,
   `AGENTIC_WEB_FETCH_MAX_RESPONSE_BYTES`, and `AGENTIC_WEB_FETCH_TIMEOUT_SECS`.
+- Accepted user-message `input_file` parts that carry an inline UTF-8 text file in `file_data` (#469). The typed
+  Responses executor decodes a base64 data URL with a text media type (`text/*`, `application/json`,
+  `application/xml`, `application/yaml`), or raw base64 with a common text extension in `filename`, and sends it
+  upstream as an `input_text` part, prefixed with `File: <filename>` when a filename is given, so text-only models
+  can read it. Stored history and compacted windows keep the original `input_file`; the text is re-inlined on each
+  continuation. Such requests run through the executor even with `store: false`, so stored and stateless requests
+  behave the same. `file_id`, `file_url`, binary or PDF data, invalid base64, and non-UTF-8 content are still
+  rejected with HTTP 400 and a specific reason. No file is fetched and no dependency is added.
 
 ### Changed
 

@@ -99,29 +99,45 @@ vision-token usage depends on the model and image processor, so choose a thresho
 ## File inputs
 
 Message content parts with `type: "input_file"` are parsed without dropping `file_data`, `file_id`, `file_url`,
-or `filename`, but the typed Responses executor does not support resolving or reading those files. It returns an
-HTTP 400 `invalid_request_error` (or the equivalent WebSocket error) before inference. The same validation applies
-to files restored from response/conversation history, explicit and automatic compaction, `compaction_trigger`,
-and WebSocket `generate: false` requests. Use supported `input_text` or `input_image` content instead.
+or `filename`. The typed Responses executor accepts a message file only when `file_data` carries an inline UTF-8
+text file, sent as either:
 
-Eligible raw `store: false` proxy requests remain byte-transparent and leave file support to the upstream. Merely
-setting `store: false` does not select that path when history or an in-process feature requires typed execution.
-Structured function/custom tool call outputs containing files retain their existing pass-through behavior.
+- a base64 data URL with a text media type (`text/*`, `application/json`, `application/xml`, or
+  `application/yaml`), such as `data:text/plain;base64,aGVsbG8=`; media type parameters such as `charset` are
+  ignored, and an explicit media type takes precedence over the filename; or
+- raw base64, or a data URL with `application/octet-stream` or no media type, together with a `filename` whose
+  extension is a common text type such as `.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.toml`, `.log`, or a source
+  code extension.
 
-API `input_file` content is distinct from mentioning a local filename in Codex or asking a client-executed read tool
-to read a file. A local file mention is not a file upload, and this gateway does not resolve local paths or implement
-a file-ID resolver, OCR, or document parser.
+The file is decoded only in the request sent to the model, where it becomes an `input_text` part in the same
+position. When `filename` is set, the text starts with a `File: <filename>` line, so this part:
 
-## File inputs
+```json
+{"type": "input_file", "filename": "notes.txt", "file_data": "data:text/plain;base64,aGVsbG8="}
+```
 
-Message content parts with `type: "input_file"` are parsed without dropping `file_data`, `file_id`, `file_url`,
-or `filename`, but the typed Responses executor does not support resolving or reading those files. It returns an
-HTTP 400 `invalid_request_error` (or the equivalent WebSocket error) before inference. The same validation applies
-to files restored from response/conversation history, explicit and automatic compaction, `compaction_trigger`,
-and WebSocket `generate: false` requests. Use supported `input_text` or `input_image` content instead.
+reaches the model as:
 
-Eligible raw `store: false` proxy requests remain byte-transparent and leave file support to the upstream. Merely
-setting `store: false` does not select that path when history or an in-process feature requires typed execution.
+```json
+{"type": "input_text", "text": "File: notes.txt\nhello"}
+```
+
+Stored response and conversation history and compacted windows keep the client's original `input_file`; the text
+is decoded again on each continuation. The file counts toward the request body limit
+(`max_request_body_size_bytes`) in its base64 form, and the decoded text counts toward the model's context length.
+
+Every other message file is rejected with HTTP 400 `invalid_request_error` (or the equivalent WebSocket error)
+before inference and before anything is stored. The message gives the reason without echoing the file: `file_id`
+(this gateway has no Files API), `file_url` (the gateway does not fetch files), a missing `file_data`, a non-text
+file such as a PDF, a data URL that is not base64-encoded, invalid base64, or content that is not valid UTF-8.
+Extract text from PDFs and other documents client-side and send it as `input_text`, or send pages as
+`input_image`. The same validation applies to files restored from response/conversation history, explicit and
+automatic compaction, `compaction_trigger`, and WebSocket `generate: false` requests.
+
+A `store: false` request with an inline text file runs through the executor, so the model sees the same input
+whether or not the request is stored. Other eligible raw `store: false` proxy requests, including ones with
+`file_id`, `file_url`, or PDF files, remain byte-transparent and leave file support to the upstream. Merely setting
+`store: false` does not select that path when history or an in-process feature requires typed execution.
 Structured function/custom tool call outputs containing files retain their existing pass-through behavior.
 
 API `input_file` content is distinct from mentioning a local filename in Codex or asking a client-executed read tool

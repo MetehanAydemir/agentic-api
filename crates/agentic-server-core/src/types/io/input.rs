@@ -1,6 +1,7 @@
 mod calls;
 mod content;
 mod conversions;
+mod file_text;
 mod validation;
 mod window;
 

@@ -74,9 +74,12 @@ pub async fn responses(State(state): State<AppState>, req: Request) -> Response 
     };
 
     let has_tool_search_state = ToolSearchHandler::request_has_state(&routing_payload);
+    // The gateway inlines text files, so `store: false` must not bypass it.
+    let has_inline_text_file = routing_payload.input.has_inline_text_file();
     let should_execute = routing_payload.store
         || routing_payload.previous_response_id.is_some()
         || has_tool_search_state
+        || has_inline_text_file
         || routing_payload.in_process_feature().is_some();
     debug!(
         route = if should_execute { "executor" } else { "proxy" },
@@ -87,6 +90,7 @@ pub async fn responses(State(state): State<AppState>, req: Request) -> Response 
         has_compaction = routing_payload.input.contains_compaction(),
         has_compaction_trigger = routing_payload.input.has_compaction_trigger(),
         has_tool_search_state,
+        has_inline_text_file,
         context_management = routing_payload.context_management.as_ref().map_or(0, Vec::len),
         tools = routing_payload.tools.as_ref().map_or(0, Vec::len),
         "routing HTTP responses request"
