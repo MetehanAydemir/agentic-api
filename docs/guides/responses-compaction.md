@@ -102,12 +102,18 @@ Message content parts with `type: "input_file"` are parsed without dropping `fil
 or `filename`. The typed Responses executor accepts a message file only when `file_data` carries an inline UTF-8
 text file, sent as either:
 
-- a base64 data URL with a text media type (`text/*`, `application/json`, `application/xml`, or
-  `application/yaml`), such as `data:text/plain;base64,aGVsbG8=`; media type parameters such as `charset` are
-  ignored, and an explicit media type takes precedence over the filename; or
-- raw base64, or a data URL with `application/octet-stream` or no media type, together with a `filename` whose
-  extension is a common text type such as `.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.toml`, `.log`, or a source
-  code extension.
+- a base64 data URL with a text media type: `text/*`, `application/json`, `application/xml`, `application/yaml`,
+  any `+json` or `+xml` type such as `application/ld+json`, or a text `application/*` type such as
+  `application/javascript`, `application/typescript`, `application/x-sh`, `application/sql`, or
+  `application/toml`. For example, `data:text/plain;base64,aGVsbG8=`. Media type parameters such as `charset` are
+  ignored. A text media type is accepted with or without a filename; or
+- raw base64, or a data URL with any other media type except `application/pdf`, `image/*`, `audio/*`, and
+  `video/*`, together with a text `filename`: one whose extension is a common text, config, or source code type
+  such as `.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.toml`, `.log`, `.py`, `.rb`, `.cs`, `.tsx`, or `.ps1`, or a
+  conventional name such as `Dockerfile`, `Makefile`, `LICENSE`, `.gitignore`, or `.env`. `video/mp2t`, which
+  some clients send for TypeScript, is accepted with a `.ts`, `.mts`, or `.cts` filename.
+
+Content that passes these checks must still decode as UTF-8, so binary data is rejected even with a text filename.
 
 The file is decoded only in the request sent to the model, where it becomes an `input_text` part in the same
 position. When `filename` is set, the text starts with a `File: <filename>` line, so this part:

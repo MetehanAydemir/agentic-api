@@ -1,32 +1,23 @@
 //! Inline UTF-8 text files carried by message `input_file` parts.
 //!
-//! A message file is accepted only when its `file_data` is a base64 text file:
-//! a data URL with a text media type, or raw base64 (or an
-//! `application/octet-stream` data URL) whose `filename` has a known text
-//! extension. The client's `input_file` is what the gateway stores; only the
-//! model-facing copy replaces it with the `input_text` part produced by
-//! `InputTextContent::try_from(&InputFileContent)`.
+//! A message file is accepted only when its `file_data` is base64 (a data URL
+//! or raw) and the file is identified as text: either its media type is text
+//! (`text/*`, a reviewed list of text `application/*` types, or any `+json` or
+//! `+xml` type), or its `filename` has a known text extension or name such as
+//! `Dockerfile` or `.gitignore`. The filename decides for raw base64 and for
+//! any media type except PDF, image, audio, and video; `video/mp2t` with a
+//! `.ts`, `.mts`, or `.cts` name is TypeScript. Strict UTF-8 decoding rejects
+//! binary content that passes these checks. The client's `input_file` is what
+//! the gateway stores; only the model-facing copy replaces it with the
+//! `input_text` part produced by `InputTextContent::try_from(&InputFileContent)`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use thiserror::Error;
 
+mod kinds;
+
 use super::{InputFileContent, InputTextContent};
-
-/// Non-`text/*` media types whose content is text.
-const TEXT_MEDIA_TYPES: [&str; 4] = [
-    "application/json",
-    "application/xml",
-    "application/yaml",
-    "application/x-yaml",
-];
-
-/// File extensions accepted when the data carries no specific media type.
-const TEXT_EXTENSIONS: [&str; 35] = [
-    "c", "cc", "cfg", "conf", "cpp", "css", "csv", "go", "h", "hpp", "htm", "html", "ini", "java", "js", "json",
-    "jsonl", "log", "markdown", "md", "mjs", "ndjson", "py", "rs", "rst", "sh", "sql", "tex", "toml", "ts", "tsv",
-    "txt", "xml", "yaml", "yml",
-];
 
 /// Why a message `input_file` cannot be converted to model-facing text.
 ///
@@ -46,9 +37,10 @@ pub enum InputFileError {
     #[error("input_file without file_data is not supported; send the file inline as file_data")]
     MissingData,
     #[error(
-        "input_file content is not supported: only UTF-8 text files (text/*, application/json, application/xml, \
-         application/yaml) can be inlined; extract the text client-side and send it as input_text, or send pages \
-         as input_image"
+        "input_file content is not supported: only UTF-8 text files can be inlined, identified by a text media \
+         type (text/*, application/json, application/xml, application/yaml, any +json or +xml type, or another \
+         text type such as application/javascript) or, for raw base64 or a generic media type, by a filename with \
+         a text extension; extract the text client-side and send it as input_text, or send pages as input_image"
     )]
     NotText,
     #[error("input_file file_data is not supported: data URLs must be base64-encoded (data:<media type>;base64,...)")]
@@ -57,26 +49,6 @@ pub enum InputFileError {
     InvalidBase64,
     #[error("input_file file_data is not supported: the decoded file is not valid UTF-8 text")]
     NotUtf8,
-}
-
-fn is_text_media_type(media_type: &str) -> bool {
-    let media_type = media_type.trim();
-    media_type
-        .get(..5)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("text/"))
-        || TEXT_MEDIA_TYPES
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(media_type))
-}
-
-fn has_text_extension(filename: Option<&str>) -> bool {
-    filename
-        .and_then(|name| name.rsplit_once('.'))
-        .is_some_and(|(_, extension)| {
-            TEXT_EXTENSIONS
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(extension))
-        })
 }
 
 /// Split a base64 data URL into its media type and payload.
@@ -103,18 +75,11 @@ impl InputFileContent {
             return Err(InputFileError::FileUrl);
         }
         let data = self.file_data.as_deref().ok_or(InputFileError::MissingData)?;
-        let filename = self.filename.as_deref();
         let (media_type, payload) = match data.get(..5) {
             Some(scheme) if scheme.eq_ignore_ascii_case("data:") => parse_data_url(&data[5..])?,
             _ => ("", data),
         };
-        // An explicit media type wins; a generic one falls back to the filename.
-        let is_text = if media_type.is_empty() || media_type.eq_ignore_ascii_case("application/octet-stream") {
-            has_text_extension(filename)
-        } else {
-            is_text_media_type(media_type)
-        };
-        if is_text {
+        if kinds::is_text_file(media_type, self.filename.as_deref()) {
             Ok(payload)
         } else {
             Err(InputFileError::NotText)
@@ -226,6 +191,66 @@ mod tests {
         assert_eq!(text(&data(&octet, Some("archive.zip"))), Err(InputFileError::NotText));
         let empty_type = format!("data:;base64,{payload}");
         assert_eq!(text(&data(&empty_type, Some("a.txt"))).unwrap(), "File: a.txt\n# Notes");
+    }
+
+    #[test]
+    fn accepts_common_source_and_config_files_by_media_type() {
+        for (media_type, filename) in [
+            ("application/javascript", "app.js"),
+            ("application/x-sh", "run.sh"),
+            ("application/toml", "Cargo.toml"),
+            ("application/sql", "schema.sql"),
+            ("application/ld+json", "context.jsonld"),
+            ("application/typescript", "index.ts"),
+            ("video/mp2t", "index.ts"),
+        ] {
+            let url = format!("data:{media_type};base64,{}", encode(b"x = 1"));
+            assert_eq!(
+                text(&data(&url, Some(filename))).unwrap(),
+                format!("File: {filename}\nx = 1"),
+                "{media_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_base64_is_accepted_for_text_filenames_only() {
+        let payload = encode(b"FROM scratch");
+        for filename in ["Dockerfile", "main.rb", "A.cs"] {
+            assert_eq!(
+                text(&data(&payload, Some(filename))).unwrap(),
+                format!("File: {filename}\nFROM scratch")
+            );
+        }
+        assert_eq!(text(&data(&payload, Some("blob"))), Err(InputFileError::NotText));
+    }
+
+    #[test]
+    fn binary_files_stay_rejected_despite_text_filenames() {
+        for media_type in ["application/pdf", "image/png"] {
+            let url = format!("data:{media_type};base64,{}", encode(b"text"));
+            assert_eq!(
+                text(&data(&url, Some("a.txt"))),
+                Err(InputFileError::NotText),
+                "{media_type}"
+            );
+        }
+        let zip = format!(
+            "data:application/zip;base64,{}",
+            encode(&[0x50, 0x4b, 0x03, 0x04, 0xff, 0x00])
+        );
+        assert_eq!(text(&data(&zip, Some("a.txt"))), Err(InputFileError::NotUtf8));
+    }
+
+    #[test]
+    fn not_text_error_explains_the_filename_rule() {
+        let message = InputFileError::NotText.to_string();
+        assert!(message.contains("only UTF-8 text files"), "{message}");
+        assert!(
+            message.contains("for raw base64 or a generic media type, by a filename with a text extension"),
+            "{message}"
+        );
+        assert!(message.contains("+json or +xml"), "{message}");
     }
 
     #[test]
