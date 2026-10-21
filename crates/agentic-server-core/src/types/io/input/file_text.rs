@@ -4,14 +4,14 @@
 //! a data URL with a text media type, or raw base64 (or an
 //! `application/octet-stream` data URL) whose `filename` has a known text
 //! extension. The client's `input_file` is what the gateway stores; only the
-//! model-facing copy replaces it with an `input_text` part.
+//! model-facing copy replaces it with the `input_text` part produced by
+//! `InputTextContent::try_from(&InputFileContent)`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use thiserror::Error;
 
-use super::{InputContent, InputFileContent, InputItem, InputMessageContent, ResponsesInput};
-use crate::types::io::InOutItem;
+use super::{InputFileContent, InputTextContent};
 
 /// Non-`text/*` media types whose content is text.
 const TEXT_MEDIA_TYPES: [&str; 4] = [
@@ -28,11 +28,11 @@ const TEXT_EXTENSIONS: [&str; 35] = [
     "txt", "xml", "yaml", "yml",
 ];
 
-/// Why a message `input_file` cannot be inlined as text.
+/// Why a message `input_file` cannot be converted to model-facing text.
 ///
 /// Messages never echo the file data, URL, name, or media type.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub(super) enum InputFileError {
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum InputFileError {
     #[error(
         "input_file with file_id is not supported: this gateway has no Files API; send the file inline as \
          file_data (a base64 UTF-8 text file) or as input_text"
@@ -121,35 +121,42 @@ impl InputFileContent {
         }
     }
 
-    /// Decode the file as UTF-8 text, prefixed with `File: <filename>` when a filename is set.
+    fn decoded_bytes(&self) -> Result<Vec<u8>, InputFileError> {
+        STANDARD
+            .decode(self.text_payload()?)
+            .map_err(|_| InputFileError::InvalidBase64)
+    }
+
+    /// Check that the file can be sent to the model as text, without building the model-facing text.
     ///
     /// # Errors
     /// Returns why the file cannot be inlined: a file reference, missing data,
     /// a non-text media type, or data that is not base64-encoded UTF-8.
-    pub(super) fn inline_text(&self) -> Result<String, InputFileError> {
-        let bytes = STANDARD
-            .decode(self.text_payload()?)
-            .map_err(|_| InputFileError::InvalidBase64)?;
-        let text = String::from_utf8(bytes).map_err(|_| InputFileError::NotUtf8)?;
-        Ok(match self.filename.as_deref() {
-            Some(filename) => format!("File: {filename}\n{text}"),
-            None => text,
-        })
+    pub(super) fn validate(&self) -> Result<(), InputFileError> {
+        std::str::from_utf8(&self.decoded_bytes()?)
+            .map(drop)
+            .map_err(|_| InputFileError::NotUtf8)
     }
 }
 
-impl ResponsesInput {
-    /// Whether a message carries an `input_file` the gateway inlines as text.
-    ///
-    /// Classifies the reference fields and media type only, without decoding,
-    /// so routing can send such requests to the executor even with
-    /// `store: false`. Malformed data is rejected later by [`Self::validate`].
-    #[must_use]
-    pub fn has_inline_text_file(&self) -> bool {
-        matches!(self, Self::Items(items) if items.iter().any(|item| matches!(item,
-            InOutItem::Input(InputItem::Message(message)) if matches!(&message.content,
-                InputMessageContent::Parts(parts) if parts.iter().any(|part| matches!(part,
-                    InputContent::InputFile(file) if file.text_payload().is_ok()))))))
+/// The model-facing text of an inline text file, prefixed with
+/// `File: <filename>` when a filename is set.
+impl TryFrom<&InputFileContent> for InputTextContent {
+    type Error = InputFileError;
+
+    fn try_from(file: &InputFileContent) -> Result<Self, Self::Error> {
+        let text = String::from_utf8(file.decoded_bytes()?).map_err(|_| InputFileError::NotUtf8)?;
+        Ok(Self::new(match file.filename.as_deref() {
+            Some(filename) => {
+                let mut prefixed = format!(
+                    "File: {filename}
+"
+                );
+                prefixed.push_str(&text);
+                prefixed
+            }
+            None => text,
+        }))
     }
 }
 
@@ -170,6 +177,13 @@ mod tests {
         }
     }
 
+    /// Convert like normalization does, checking that validation agrees.
+    fn text(file: &InputFileContent) -> Result<String, InputFileError> {
+        let converted = InputTextContent::try_from(file).map(|part| part.text);
+        assert_eq!(file.validate(), converted.as_ref().map(drop).map_err(Clone::clone));
+        converted
+    }
+
     fn encode(text: &[u8]) -> String {
         STANDARD.encode(text)
     }
@@ -184,11 +198,11 @@ mod tests {
             "application/xml",
         ] {
             let url = format!("data:{media_type};base64,{}", encode(b"a: 1"));
-            assert_eq!(data(&url, None).inline_text().unwrap(), "a: 1", "{media_type}");
+            assert_eq!(text(&data(&url, None)).unwrap(), "a: 1", "{media_type}");
         }
         let url = format!("data:application/yaml;base64,{}", encode(b"a: 1"));
         assert_eq!(
-            data(&url, Some("config.yaml")).inline_text().unwrap(),
+            text(&data(&url, Some("config.yaml"))).unwrap(),
             "File: config.yaml\na: 1"
         );
     }
@@ -196,10 +210,7 @@ mod tests {
     #[test]
     fn ignores_media_type_parameters() {
         let url = format!("data:text/plain;charset=utf-8;base64,{}", encode("héllo".as_bytes()));
-        assert_eq!(
-            data(&url, Some("notes.txt")).inline_text().unwrap(),
-            "File: notes.txt\nhéllo"
-        );
+        assert_eq!(text(&data(&url, Some("notes.txt"))).unwrap(), "File: notes.txt\nhéllo");
     }
 
     #[test]
@@ -207,36 +218,30 @@ mod tests {
         let payload = encode(b"# Notes");
         let octet = format!("data:application/octet-stream;base64,{payload}");
         assert_eq!(
-            data(&octet, Some("notes.md")).inline_text().unwrap(),
+            text(&data(&octet, Some("notes.md"))).unwrap(),
             "File: notes.md\n# Notes"
         );
         assert_eq!(
-            data(&payload, Some("config.YML")).inline_text().unwrap(),
+            text(&data(&payload, Some("config.YML"))).unwrap(),
             "File: config.YML\n# Notes"
         );
         assert_eq!(
-            data(&payload, Some("config.yaml")).inline_text().unwrap(),
+            text(&data(&payload, Some("config.yaml"))).unwrap(),
             "File: config.yaml\n# Notes"
         );
-        assert_eq!(data(&payload, None).inline_text(), Err(InputFileError::NotText));
-        assert_eq!(
-            data(&octet, Some("archive.zip")).inline_text(),
-            Err(InputFileError::NotText)
-        );
+        assert_eq!(text(&data(&payload, None)), Err(InputFileError::NotText));
+        assert_eq!(text(&data(&octet, Some("archive.zip"))), Err(InputFileError::NotText));
         let empty_type = format!("data:;base64,{payload}");
-        assert_eq!(
-            data(&empty_type, Some("a.txt")).inline_text().unwrap(),
-            "File: a.txt\n# Notes"
-        );
+        assert_eq!(text(&data(&empty_type, Some("a.txt"))).unwrap(), "File: a.txt\n# Notes");
     }
 
     #[test]
     fn rejects_pdf_by_media_type_or_filename() {
         let pdf = format!("data:application/pdf;base64,{}", encode(b"%PDF-1.7"));
         // An explicit media type wins over a text filename.
-        assert_eq!(data(&pdf, Some("a.txt")).inline_text(), Err(InputFileError::NotText));
+        assert_eq!(text(&data(&pdf, Some("a.txt"))), Err(InputFileError::NotText));
         assert_eq!(
-            data(&encode(b"%PDF-1.7"), Some("report.pdf")).inline_text(),
+            text(&data(&encode(b"%PDF-1.7"), Some("report.pdf"))),
             Err(InputFileError::NotText)
         );
     }
@@ -244,11 +249,11 @@ mod tests {
     #[test]
     fn rejects_references_and_missing_data() {
         let reference = file(json!({"file_id":"file_1", "file_data":"aGk=", "filename":"a.txt"}));
-        assert_eq!(reference.inline_text(), Err(InputFileError::FileId));
+        assert_eq!(text(&reference), Err(InputFileError::FileId));
         let url = file(json!({"file_url":"https://example.invalid/a.txt"}));
-        assert_eq!(url.inline_text(), Err(InputFileError::FileUrl));
+        assert_eq!(text(&url), Err(InputFileError::FileUrl));
         assert_eq!(
-            file(json!({"filename":"a.txt"})).inline_text(),
+            text(&file(json!({"filename":"a.txt"}))),
             Err(InputFileError::MissingData)
         );
     }
@@ -256,55 +261,28 @@ mod tests {
     #[test]
     fn rejects_undecodable_data() {
         assert_eq!(
-            data("data:text/plain,hello", None).inline_text(),
+            text(&data("data:text/plain,hello", None)),
             Err(InputFileError::NotBase64DataUrl)
         );
         assert_eq!(
-            data("data:text/plain", None).inline_text(),
+            text(&data("data:text/plain", None)),
             Err(InputFileError::NotBase64DataUrl)
         );
         assert_eq!(
-            data("data:text/plain;base64,not base64!", None).inline_text(),
+            text(&data("data:text/plain;base64,not base64!", None)),
             Err(InputFileError::InvalidBase64)
         );
         let latin1 = format!("data:text/plain;base64,{}", encode(&[0x68, 0xe9, 0x6c]));
-        assert_eq!(data(&latin1, None).inline_text(), Err(InputFileError::NotUtf8));
+        assert_eq!(text(&data(&latin1, None)), Err(InputFileError::NotUtf8));
     }
 
     #[test]
     fn accepts_empty_and_multibyte_text() {
         assert_eq!(
-            data("data:text/plain;base64,", Some("empty.txt"))
-                .inline_text()
-                .unwrap(),
+            text(&data("data:text/plain;base64,", Some("empty.txt"))).unwrap(),
             "File: empty.txt\n"
         );
         let url = format!("data:text/plain;base64,{}", encode("çğış 日本 🙂".as_bytes()));
-        assert_eq!(data(&url, None).inline_text().unwrap(), "çğış 日本 🙂");
-    }
-
-    #[test]
-    fn routing_classifies_without_decoding() {
-        let input = |part: serde_json::Value| -> ResponsesInput {
-            serde_json::from_value(json!([{"role":"user", "content":[{"type":"input_text", "text":"hi"}, part]}]))
-                .unwrap()
-        };
-        // Classification does not decode, so malformed text data still routes to the executor.
-        assert!(input(json!({"type":"input_file", "file_data":"data:text/plain;base64,!!"})).has_inline_text_file());
-        for part in [
-            json!({"type":"input_file", "file_id":"file_1"}),
-            json!({"type":"input_file", "file_url":"https://example.invalid/a.txt"}),
-            json!({"type":"input_file", "file_data":"data:application/pdf;base64,JVBERi0="}),
-            json!({"type":"input_image", "image_url":"https://example.invalid/a.png"}),
-        ] {
-            assert!(!input(part.clone()).has_inline_text_file(), "{part}");
-        }
-        assert!(!ResponsesInput::Text("hi".to_owned()).has_inline_text_file());
-        let tool_output: ResponsesInput = serde_json::from_value(json!([
-            {"type":"function_call_output", "call_id":"call_1", "output":[
-                {"type":"input_file", "file_data":"data:text/plain;base64,aGk="}]}
-        ]))
-        .unwrap();
-        assert!(!tool_output.has_inline_text_file());
+        assert_eq!(text(&data(&url, None)).unwrap(), "çğış 日本 🙂");
     }
 }

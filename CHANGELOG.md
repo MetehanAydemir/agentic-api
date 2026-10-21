@@ -64,9 +64,9 @@ All notable changes to Agentic API are documented here.
   `application/xml`, `application/yaml`), or raw base64 with a common text extension in `filename`, and sends it
   upstream as an `input_text` part, prefixed with `File: <filename>` when a filename is given, so text-only models
   can read it. Stored history and compacted windows keep the original `input_file`; the text is re-inlined on each
-  continuation. Such requests run through the executor even with `store: false`, so stored and stateless requests
-  behave the same. `file_id`, `file_url`, binary or PDF data, invalid base64, and non-UTF-8 content are still
-  rejected with HTTP 400 and a specific reason. No file is fetched and no dependency is added.
+  continuation. On typed paths, `file_id`, `file_url`, binary or PDF data, invalid base64, and non-UTF-8 content
+  are still rejected with HTTP 400 and a specific reason. Eligible raw `store: false` proxy requests are unchanged
+  and still reach the upstream byte for byte. No file is fetched and no dependency is added.
 
 ### Changed
 

@@ -28,6 +28,16 @@ impl fmt::Display for InputValidationError {
     }
 }
 
+impl InputValidationError {
+    /// A message file at `input[item_index].content[part_index]` that cannot be converted to text.
+    pub(super) fn unsupported_file(item_index: usize, part_index: usize, reason: InputFileError) -> Self {
+        Self {
+            item_index,
+            source: MessageContentError::UnsupportedFile { part_index, reason },
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 enum MessageContentError {
     #[error("a message must contain at least one content part")]
@@ -50,8 +60,7 @@ impl InputMessageContent {
                 let kind = match part {
                     InputContent::InputFile(file) => {
                         return file
-                            .inline_text()
-                            .map(drop)
+                            .validate()
                             .map_err(|reason| MessageContentError::UnsupportedFile { part_index, reason });
                     }
                     InputContent::Unknown(kind) => kind,

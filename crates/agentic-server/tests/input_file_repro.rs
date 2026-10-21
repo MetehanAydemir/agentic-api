@@ -812,33 +812,76 @@ async fn websocket_inlines_text_file() {
     assert_eq!(fixture.stored_files().await, vec![text_file_part()]);
 }
 
-#[tokio::test]
-async fn stateless_text_file_runs_through_the_executor() {
+/// Send `raw` as a `store: false` request and assert the upstream received exactly those bytes.
+async fn assert_proxied_unchanged(raw: &str) {
     let fixture = Fixture::new().await;
-    let (status, body) = fixture
-        .post(
-            "/v1/responses",
-            json!({"model":"test-model", "store":false, "input":user_input(&text_file_part())}),
-        )
-        .await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    let captured = fixture.captured().await;
+    let response = fixture
+        .client
+        .post(format!("{}/v1/responses", fixture.url))
+        .header("content-type", "application/json")
+        .body(raw.to_owned())
+        .send()
+        .await
+        .expect("proxy response");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let _ = response.bytes().await.expect("consume proxy response");
+    let captured = fixture.requests.lock().await;
     assert_eq!(captured.len(), 1);
-    assert_inlined(&captured[0]);
+    assert_eq!(
+        String::from_utf8_lossy(&captured[0]),
+        raw,
+        "raw store:false requests must reach the upstream unchanged"
+    );
     assert_eq!(fixture.row_counts().await, (0, 0), "store:false must not persist");
 }
 
 #[tokio::test]
-async fn stateless_invalid_text_file_is_rejected_instead_of_proxied() {
+async fn stateless_mixed_text_and_pdf_files_are_proxied_unchanged() {
+    let pdf = json!({"type":"input_file", "file_data":"data:application/pdf;base64,JVBERi0=", "filename":"a.pdf"});
+    let input = json!([{"role":"user", "content":[{"type":"input_text", "text":"Compare these"},
+        text_file_part(), pdf]}]);
+    for stream in [false, true] {
+        assert_proxied_unchanged(&format!(
+            "{{
+  \"model\":\"test-model\", \"store\":false, \"stream\":{stream}, \"input\": {input}
+}}"
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn stateless_text_file_keeps_provider_fields_on_the_raw_proxy() {
+    assert_proxied_unchanged(&format!(
+        "{{\"model\":\"test-model\", \"store\":false, \"input\": {},          \"chat_template_kwargs\": {{\"enable_thinking\": false}}}}",
+        user_input(&text_file_part())
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn automatic_compaction_summarizes_inlined_text_and_keeps_the_original() {
     let fixture = Fixture::new().await;
-    let invalid = json!({"type":"input_file", "file_data":"data:text/plain;base64,@@@@", "filename":"notes.txt"});
-    let message = fixture
-        .assert_rejected(
+    let (status, body) = fixture
+        .post(
             "/v1/responses",
-            json!({"model":"test-model", "store":false, "input":user_input(&invalid)}),
+            json!({"model":"test-model", "store":true, "input":user_input(&text_file_part()),
+                "context_management":[{"type":"compaction", "compact_threshold":1}]}),
         )
         .await;
-    assert!(message.contains("not valid base64"), "{message}");
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let captured = fixture.captured().await;
+    assert_eq!(captured.len(), 2, "summary and answer requests: {captured:?}");
+    for request in &captured {
+        let encoded = request.to_string();
+        assert!(encoded.contains("hello from notes"), "{encoded}");
+        assert!(
+            !encoded.contains("file_data") && !encoded.contains("input_file"),
+            "{encoded}"
+        );
+    }
+    assert_inlined(&captured[0]);
+    assert_eq!(fixture.stored_files().await, vec![text_file_part()]);
 }
 
 #[tokio::test]
