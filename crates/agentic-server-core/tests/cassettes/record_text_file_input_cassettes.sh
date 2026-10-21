@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Records inline text-file input conversations. The gateway set is recorded
 # through Agentic API (client -> gateway -> vLLM hosting an open-source text
-# model); the optional OpenAI reference set sends the same file to the OpenAI
+# model); the OpenAI reference set sends the same file to the OpenAI
 # Responses API. Every turn carries `notes.txt` as an inline `input_file`, and
 # the release codeword appears only inside that file, so a recording proves the
 # model read the attachment.

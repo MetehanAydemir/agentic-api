@@ -9,11 +9,10 @@
 //! continuation decodes the stored file again, and compaction sends the decoded
 //! text to the summarizer while the compacted window keeps the file.
 //!
-//! The gateway set (Agentic API -> vLLM) is required. The `OpenAI` reference set is
-//! replayed and compared with it when its files exist; see
-//! `cassettes/README.md` "Text file input".
+//! Both the gateway set (Agentic API -> vLLM) and the `OpenAI` reference set are
+//! replayed, and the gateway must build the same model-facing file turn for
+//! both; see `cassettes/README.md` "Text file input".
 
-use std::path::Path;
 use std::sync::Arc;
 
 use agentic_core::executor::{ExecuteRequest, compact_response, execute};
@@ -59,17 +58,8 @@ impl Provider {
         format!("{DIR}/text-file-{scenario}-{label}-{slug}-{mode}.yaml")
     }
 
-    /// Load a recording; the `OpenAI` reference set is optional until the owner records it.
-    fn load(self, scenario: &str, compaction: bool, mode: &str) -> Option<support::Cassette> {
-        let path = self.path(scenario, compaction, mode);
-        match self {
-            Self::Gateway => Some(support::load_cassette(&path)),
-            Self::OpenAi if Path::new(&path).exists() => Some(support::load_cassette(&path)),
-            Self::OpenAi => {
-                eprintln!("skipping the OpenAI reference: {path} is not recorded yet");
-                None
-            }
-        }
+    fn load(self, scenario: &str, compaction: bool, mode: &str) -> support::Cassette {
+        support::load_cassette(&self.path(scenario, compaction, mode))
     }
 }
 
@@ -196,14 +186,14 @@ async fn replay_conversation(cassette: &support::Cassette, streaming: bool) -> V
     requests
 }
 
-async fn check_single(provider: Provider, streaming: bool) -> Option<Vec<Value>> {
-    let cassette = provider.load("single", false, mode(streaming))?;
+async fn check_single(provider: Provider, streaming: bool) -> Vec<Value> {
+    let cassette = provider.load("single", false, mode(streaming));
     assert_eq!(cassette.turns.len(), 1);
-    Some(replay_conversation(&cassette, streaming).await)
+    replay_conversation(&cassette, streaming).await
 }
 
-async fn check_continuation(provider: Provider, streaming: bool) -> Option<Vec<Value>> {
-    let cassette = provider.load("continuation", false, mode(streaming))?;
+async fn check_continuation(provider: Provider, streaming: bool) -> Vec<Value> {
+    let cassette = provider.load("continuation", false, mode(streaming));
     assert_eq!(cassette.turns.len(), 2);
     assert_eq!(cassette.turns[1].request.body.input, json!(FOLLOW_UP_PROMPT));
     let requests = replay_conversation(&cassette, streaming).await;
@@ -224,13 +214,13 @@ async fn check_continuation(provider: Provider, streaming: bool) -> Option<Vec<V
         support::request_input_texts(second).last().map(String::as_str),
         Some(FOLLOW_UP_PROMPT)
     );
-    Some(requests)
+    requests
 }
 
 /// Compact the original file, then continue from the compacted window.
-async fn check_compaction(provider: Provider) -> Option<Vec<Value>> {
-    let summary = provider.load("compact", true, "nonstreaming")?;
-    let follow_up = provider.load("compact-followup", true, "nonstreaming")?;
+async fn check_compaction(provider: Provider) -> Vec<Value> {
+    let summary = provider.load("compact", true, "nonstreaming");
+    let follow_up = provider.load("compact-followup", true, "nonstreaming");
     assert_eq!(summary.turns[0].request.body.input, fixture_json(COMPACT_INPUT));
     let fixture = support::TestFixture::new_with_responses(vec![
         support::MockResponse::from_turn(&summary.turns[0]),
@@ -297,18 +287,16 @@ async fn check_compaction(provider: Provider) -> Option<Vec<Value>> {
         "the compacted window reaches the model as recorded, with the file decoded"
     );
     assert_no_file_upstream(&requests);
-    Some(requests)
+    requests
 }
 
-/// Once the `OpenAI` reference exists, the gateway must build the same model-facing
-/// file turn for both providers. Later turns carry provider-specific answers.
-fn assert_pair(gateway: &[Value], openai: Option<Vec<Value>>) {
-    if let Some(openai) = openai {
-        assert_eq!(gateway.len(), openai.len());
-        assert_eq!(gateway[0]["input"], openai[0]["input"]);
-        if let (Some(gateway), Some(openai)) = (gateway.get(1), openai.get(1)) {
-            assert_eq!(gateway["input"][0], openai["input"][0]);
-        }
+/// The gateway must build the same model-facing file turn for both providers.
+/// Later turns carry provider-specific answers.
+fn assert_pair(gateway: &[Value], openai: &[Value]) {
+    assert_eq!(gateway.len(), openai.len());
+    assert_eq!(gateway[0]["input"], openai[0]["input"]);
+    if let (Some(gateway), Some(openai)) = (gateway.get(1), openai.get(1)) {
+        assert_eq!(gateway["input"][0], openai["input"][0]);
     }
 }
 
@@ -324,26 +312,23 @@ fn fixtures_embed_notes_txt() {
 #[tokio::test]
 async fn recorded_single_text_file_turns_reach_the_model_as_text() {
     for streaming in [false, true] {
-        let gateway = check_single(Provider::Gateway, streaming).await.expect("gateway set");
-        assert_pair(&gateway, check_single(Provider::OpenAi, streaming).await);
+        let gateway = check_single(Provider::Gateway, streaming).await;
+        assert_pair(&gateway, &check_single(Provider::OpenAi, streaming).await);
     }
 }
 
 #[tokio::test]
 async fn recorded_continuation_reinlines_the_stored_text_file() {
     for streaming in [false, true] {
-        let gateway = check_continuation(Provider::Gateway, streaming)
-            .await
-            .expect("gateway set");
-        assert_pair(&gateway, check_continuation(Provider::OpenAi, streaming).await);
+        let gateway = check_continuation(Provider::Gateway, streaming).await;
+        assert_pair(&gateway, &check_continuation(Provider::OpenAi, streaming).await);
     }
 }
 
 #[tokio::test]
 async fn recorded_compaction_summarizes_decoded_text_and_keeps_the_file() {
-    let gateway = check_compaction(Provider::Gateway).await.expect("gateway set");
+    let gateway = check_compaction(Provider::Gateway).await;
+    let openai = check_compaction(Provider::OpenAi).await;
     // Summaries differ by model, so only the summary request is compared.
-    if let Some(openai) = check_compaction(Provider::OpenAi).await {
-        assert_eq!(gateway[0]["input"], openai[0]["input"]);
-    }
+    assert_eq!(gateway[0]["input"], openai[0]["input"]);
 }
