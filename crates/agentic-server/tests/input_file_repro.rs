@@ -842,9 +842,7 @@ async fn stateless_mixed_text_and_pdf_files_are_proxied_unchanged() {
         text_file_part(), pdf]}]);
     for stream in [false, true] {
         assert_proxied_unchanged(&format!(
-            "{{
-  \"model\":\"test-model\", \"store\":false, \"stream\":{stream}, \"input\": {input}
-}}"
+            "{{\n  \"model\":\"test-model\", \"store\":false, \"stream\":{stream}, \"input\": {input}\n}}"
         ))
         .await;
     }
@@ -853,7 +851,8 @@ async fn stateless_mixed_text_and_pdf_files_are_proxied_unchanged() {
 #[tokio::test]
 async fn stateless_text_file_keeps_provider_fields_on_the_raw_proxy() {
     assert_proxied_unchanged(&format!(
-        "{{\"model\":\"test-model\", \"store\":false, \"input\": {},          \"chat_template_kwargs\": {{\"enable_thinking\": false}}}}",
+        "{{\"model\":\"test-model\", \"store\":false, \"input\": {}, \
+         \"chat_template_kwargs\": {{\"enable_thinking\": false}}}}",
         user_input(&text_file_part())
     ))
     .await;

@@ -147,14 +147,7 @@ impl TryFrom<&InputFileContent> for InputTextContent {
     fn try_from(file: &InputFileContent) -> Result<Self, Self::Error> {
         let text = String::from_utf8(file.decoded_bytes()?).map_err(|_| InputFileError::NotUtf8)?;
         Ok(Self::new(match file.filename.as_deref() {
-            Some(filename) => {
-                let mut prefixed = format!(
-                    "File: {filename}
-"
-                );
-                prefixed.push_str(&text);
-                prefixed
-            }
+            Some(filename) => format!("File: {filename}\n{text}"),
             None => text,
         }))
     }
